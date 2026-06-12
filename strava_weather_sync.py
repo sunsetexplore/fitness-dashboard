@@ -106,6 +106,9 @@ def fetch_activities(access_token: str, after_epoch: Optional[int]) -> list:
 # --------------------------------------------------------------------------
 # Weather (Open-Meteo)
 # --------------------------------------------------------------------------
+_WEATHER_CACHE: dict = {}
+
+
 def fetch_weather(lat: float, lng: float, when: dt.datetime) -> dict:
     """
     Hourly weather at the run's start location/time.
@@ -115,23 +118,32 @@ def fetch_weather(lat: float, lng: float, when: dt.datetime) -> dict:
     real time by several days).
     """
     date_str = when.strftime("%Y-%m-%d")
-    recent = (dt.datetime.now(dt.timezone.utc) - when).days <= 10
-    url = OM_FORECAST_URL if recent else OM_ARCHIVE_URL
-    params = {
-        "latitude": lat,
-        "longitude": lng,
-        "start_date": date_str,
-        "end_date": date_str,
-        "hourly": ("temperature_2m,relative_humidity_2m,dew_point_2m,"
-                   "wind_speed_10m,wind_direction_10m,precipitation"),
-        "temperature_unit": "fahrenheit",
-        "wind_speed_unit": "mph",
-        "precipitation_unit": "mm",
-        "timezone": "auto",
-    }
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    hourly = r.json().get("hourly", {})
+    # Cache by rounded location + date so repeated nearby same-day runs reuse
+    # one response instead of re-calling the API.
+    cache_key = (round(lat, 2), round(lng, 2), date_str)
+    if cache_key in _WEATHER_CACHE:
+        hourly = _WEATHER_CACHE[cache_key]
+    else:
+        # `when` is naive (Strava's start_date_local). Compare against a naive
+        # "now" so we don't mix offset-aware and offset-naive datetimes. The
+        # 10-day threshold has plenty of slop, so local-vs-UTC doesn't matter.
+        recent = (dt.datetime.now() - when).days <= 10
+        url = OM_FORECAST_URL if recent else OM_ARCHIVE_URL
+        params = {
+            "latitude": lat,
+            "longitude": lng,
+            "start_date": date_str,
+            "end_date": date_str,
+            "hourly": ("temperature_2m,relative_humidity_2m,dew_point_2m,"
+                       "wind_speed_10m,wind_direction_10m,precipitation"),
+            "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph",
+            "precipitation_unit": "mm",
+            "timezone": "auto",
+        }
+        hourly = _request_weather(url, params)
+        _WEATHER_CACHE[cache_key] = hourly
+
     times = hourly.get("time", [])
     if not times:
         return {}
@@ -147,6 +159,20 @@ def fetch_weather(lat: float, lng: float, when: dt.datetime) -> dict:
         "wind_dir_deg": _at(hourly, "wind_direction_10m", idx),
         "precip_mm": _at(hourly, "precipitation", idx),
     }
+
+
+def _request_weather(url: str, params: dict, retries: int = 3) -> dict:
+    """GET with a short backoff if Open-Meteo rate-limits us (429)."""
+    for attempt in range(retries):
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code == 429:
+            wait = 10 * (attempt + 1)
+            print(f"Open-Meteo rate limit; waiting {wait}s...")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json().get("hourly", {})
+    return {}
 
 
 def _at(hourly: dict, key: str, idx: int):
@@ -273,12 +299,33 @@ def main():
           + (f" after {dt.datetime.fromtimestamp(after)}" if after else " (full history)"))
 
     activities = fetch_activities(token, after)
-    runs = [a for a in activities
-            if a.get("type") == "Run" and str(a["id"]) not in existing]
-    print(f"New runs to process: {len(runs)}")
+
+    runs, skipped = [], {"manual": 0, "treadmill": 0, "no_gps": 0, "not_run": 0}
+    for a in activities:
+        if str(a["id"]) in existing:
+            continue
+        if a.get("type") != "Run":
+            skipped["not_run"] += 1
+            continue
+        if a.get("manual"):                      # hand-typed entries (incl. missed miles)
+            skipped["manual"] += 1
+            continue
+        if a.get("trainer"):                     # treadmill / indoor
+            skipped["treadmill"] += 1
+            continue
+        latlng = a.get("start_latlng")
+        if not latlng or len(latlng) < 2:        # no usable GPS start point
+            skipped["no_gps"] += 1
+            continue
+        runs.append(a)
+
+    print(f"New outdoor GPS runs to process: {len(runs)}")
+    print(f"Skipped -> manual: {skipped['manual']}, treadmill: {skipped['treadmill']}, "
+          f"no GPS: {skipped['no_gps']}, non-run: {skipped['not_run']}")
 
     rows = []
     for a in runs:
+      try:
         start = a.get("start_latlng") or [None, None]
         end = a.get("end_latlng") or [None, None]
         slat, slng = (start + [None, None])[:2]
@@ -328,7 +375,9 @@ def main():
             "precip_mm": wx.get("precip_mm"),
             "fitness_score": score,
         })
-        time.sleep(0.2)  # be gentle on Open-Meteo
+      except Exception as e:
+        print(f"Skipping activity {a.get('id')} due to error: {e}")
+      time.sleep(0.1)  # be gentle on Open-Meteo
 
     if rows:
         rows.sort(key=lambda r: r["start_date_local"] or "")
@@ -339,4 +388,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import traceback
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        raise
