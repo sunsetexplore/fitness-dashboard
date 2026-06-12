@@ -106,51 +106,156 @@ def fetch_activities(access_token: str, after_epoch: Optional[int]) -> list:
 # --------------------------------------------------------------------------
 # Weather (Open-Meteo)
 # --------------------------------------------------------------------------
-_WEATHER_CACHE: dict = {}
+HOURLY_VARS = [
+    "temperature_2m", "relative_humidity_2m", "dew_point_2m",
+    "wind_speed_10m", "wind_direction_10m", "precipitation",
+]
 
 
-def fetch_weather(lat: float, lng: float, when: dt.datetime) -> dict:
+def _parse_when(start_local: Optional[str]) -> Optional[dt.datetime]:
+    if not start_local:
+        return None
+    try:
+        return dt.datetime.fromisoformat(start_local.replace("Z", ""))
+    except ValueError:
+        return None
+
+
+def _bucket(lat: float, lng: float):
+    """Round to ~0.1 degree (~11 km). ERA5's grid is coarser than this anyway,
+    so nearby trailheads share one weather pull with no loss of accuracy."""
+    return (round(lat, 1), round(lng, 1))
+
+
+def _request_hourly(url: str, params: dict, retries: int = 5) -> dict:
     """
-    Hourly weather at the run's start location/time.
-
-    Recent dates (<= 10 days old) come from the forecast endpoint, which
-    retains recent past; older dates come from the ERA5 archive (which lags
-    real time by several days).
+    Robust GET: retries on read timeouts, connection drops, and 429s with
+    escalating backoff. Returns the 'hourly' block, or {} if it ultimately
+    fails (so one bad pull never kills the job).
     """
-    date_str = when.strftime("%Y-%m-%d")
-    # Cache by rounded location + date so repeated nearby same-day runs reuse
-    # one response instead of re-calling the API.
-    cache_key = (round(lat, 2), round(lng, 2), date_str)
-    if cache_key in _WEATHER_CACHE:
-        hourly = _WEATHER_CACHE[cache_key]
-    else:
-        # `when` is naive (Strava's start_date_local). Compare against a naive
-        # "now" so we don't mix offset-aware and offset-naive datetimes. The
-        # 10-day threshold has plenty of slop, so local-vs-UTC doesn't matter.
-        recent = (dt.datetime.now() - when).days <= 10
-        url = OM_FORECAST_URL if recent else OM_ARCHIVE_URL
-        params = {
-            "latitude": lat,
-            "longitude": lng,
-            "start_date": date_str,
-            "end_date": date_str,
-            "hourly": ("temperature_2m,relative_humidity_2m,dew_point_2m,"
-                       "wind_speed_10m,wind_direction_10m,precipitation"),
-            "temperature_unit": "fahrenheit",
-            "wind_speed_unit": "mph",
-            "precipitation_unit": "mm",
-            "timezone": "auto",
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=60)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            wait = 5 * (attempt + 1)
+            print(f"  weather request {type(e).__name__}; retry in {wait}s "
+                  f"(attempt {attempt + 1}/{retries})")
+            time.sleep(wait)
+            continue
+        if r.status_code == 429:
+            wait = 15 * (attempt + 1)
+            print(f"  rate limited; waiting {wait}s (attempt {attempt + 1}/{retries})")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json().get("hourly", {})
+    print(f"  GAVE UP on weather pull: {params.get('start_date')}..{params.get('end_date')}")
+    return {}
+
+
+def prefetch_archive_weather(runs: list) -> dict:
+    """
+    Batch the historical weather. Instead of one API call per run, we group
+    runs by (rounded location, year) and pull each location's full year of
+    hourly data in a single request. A few thousand runs collapses to a few
+    dozen requests, which the archive server handles without timing out.
+
+    Returns: cache[bucket] = {"time": [...], "hourly": {var: [...]}, "index": {iso: i}}
+    Recent runs (<= 10 days) are skipped here and fetched live later.
+    """
+    now = dt.datetime.now()
+    needed: dict = {}  # bucket -> set(years)
+    for a in runs:
+        when = _parse_when(a.get("start_date_local"))
+        ll = a.get("start_latlng")
+        if not when or not ll or len(ll) < 2:
+            continue
+        if (now - when).days <= 10:
+            continue
+        needed.setdefault(_bucket(ll[0], ll[1]), set()).add(when.year)
+
+    total_pulls = sum(len(yrs) for yrs in needed.values())
+    print(f"Prefetching weather: {len(needed)} locations, {total_pulls} location-year pulls")
+
+    cache, done = {}, 0
+    for b, years in needed.items():
+        merged_time: list = []
+        merged = {k: [] for k in HOURLY_VARS}
+        for year in sorted(years):
+            start = f"{year}-01-01"
+            if year == now.year:
+                end_dt = now - dt.timedelta(days=7)  # ERA5 archive lags a few days
+                if end_dt.year < year:
+                    continue  # too early in the year for any archive data yet
+                end = end_dt.strftime("%Y-%m-%d")
+            else:
+                end = f"{year}-12-31"
+            params = {
+                "latitude": b[0], "longitude": b[1],
+                "start_date": start, "end_date": end,
+                "hourly": ",".join(HOURLY_VARS),
+                "temperature_unit": "fahrenheit",
+                "wind_speed_unit": "mph",
+                "precipitation_unit": "mm",
+                "timezone": "auto",
+            }
+            hourly = _request_hourly(OM_ARCHIVE_URL, params)
+            merged_time.extend(hourly.get("time", []))
+            for k in HOURLY_VARS:
+                merged[k].extend(hourly.get(k, []))
+            done += 1
+            if done % 10 == 0 or done == total_pulls:
+                print(f"  ...{done}/{total_pulls} pulls done")
+            time.sleep(0.5)  # gentle spacing between the (few) batched calls
+        cache[b] = {
+            "time": merged_time,
+            "hourly": merged,
+            "index": {t: i for i, t in enumerate(merged_time)},
         }
-        hourly = _request_weather(url, params)
-        _WEATHER_CACHE[cache_key] = hourly
+    return cache
 
-    times = hourly.get("time", [])
+
+def fetch_weather_live(lat: float, lng: float, when: dt.datetime) -> dict:
+    """Single forecast-endpoint call for a recent run (last ~10 days)."""
+    date_str = when.strftime("%Y-%m-%d")
+    params = {
+        "latitude": lat, "longitude": lng,
+        "start_date": date_str, "end_date": date_str,
+        "hourly": ",".join(HOURLY_VARS),
+        "temperature_unit": "fahrenheit",
+        "wind_speed_unit": "mph",
+        "precipitation_unit": "mm",
+        "timezone": "auto",
+    }
+    hourly = _request_hourly(OM_FORECAST_URL, params)
+    return _extract_hour(hourly, hourly.get("time", []), when)
+
+
+def weather_for_run(a: dict, cache: dict) -> dict:
+    """Look up a run's weather: from the batched cache, or live if it's recent."""
+    when = _parse_when(a.get("start_date_local"))
+    ll = a.get("start_latlng")
+    if not when or not ll or len(ll) < 2:
+        return {}
+    if (dt.datetime.now() - when).days <= 10:
+        return fetch_weather_live(ll[0], ll[1], when)
+    data = cache.get(_bucket(ll[0], ll[1]))
+    if not data or not data["time"]:
+        return {}
+    target = when.strftime("%Y-%m-%dT%H:00")
+    idx = data["index"].get(target)
+    if idx is None:
+        idx = _nearest_hour_idx(data["time"], when)
+    return _extract_hour(data["hourly"], data["time"], when, idx)
+
+
+def _extract_hour(hourly: dict, times: list, when: dt.datetime,
+                  idx: Optional[int] = None) -> dict:
     if not times:
         return {}
-
-    # Pick the hour closest to the run's start time.
-    target = when.strftime("%Y-%m-%dT%H:00")
-    idx = times.index(target) if target in times else _nearest_hour_idx(times, when)
+    if idx is None:
+        target = when.strftime("%Y-%m-%dT%H:00")
+        idx = times.index(target) if target in times else _nearest_hour_idx(times, when)
     return {
         "temp_f": _at(hourly, "temperature_2m", idx),
         "humidity_pct": _at(hourly, "relative_humidity_2m", idx),
@@ -159,20 +264,6 @@ def fetch_weather(lat: float, lng: float, when: dt.datetime) -> dict:
         "wind_dir_deg": _at(hourly, "wind_direction_10m", idx),
         "precip_mm": _at(hourly, "precipitation", idx),
     }
-
-
-def _request_weather(url: str, params: dict, retries: int = 3) -> dict:
-    """GET with a short backoff if Open-Meteo rate-limits us (429)."""
-    for attempt in range(retries):
-        r = requests.get(url, params=params, timeout=30)
-        if r.status_code == 429:
-            wait = 10 * (attempt + 1)
-            print(f"Open-Meteo rate limit; waiting {wait}s...")
-            time.sleep(wait)
-            continue
-        r.raise_for_status()
-        return r.json().get("hourly", {})
-    return {}
 
 
 def _at(hourly: dict, key: str, idx: int):
@@ -323,6 +414,9 @@ def main():
     print(f"Skipped -> manual: {skipped['manual']}, treadmill: {skipped['treadmill']}, "
           f"no GPS: {skipped['no_gps']}, non-run: {skipped['not_run']}")
 
+    # Batch-pull all historical weather up front (few dozen calls, not thousands).
+    weather_cache = prefetch_archive_weather(runs)
+
     rows = []
     for a in runs:
       try:
@@ -336,16 +430,13 @@ def main():
         speed_kmh = (dist_m / move_s) * 3.6 if move_s else 0.0
         pace = (move_s / 60.0) / (dist_m / 1000.0) if dist_m else None
 
-        # start_date_local is ISO; parse for the weather lookup (treat as UTC-naive).
         start_local = a.get("start_date_local")
-        when = dt.datetime.fromisoformat(start_local.replace("Z", "")) if start_local else None
 
         wx = {}
-        if slat is not None and slng is not None and when is not None:
-            try:
-                wx = fetch_weather(slat, slng, when)
-            except Exception as e:  # don't let one bad lookup kill the whole run
-                print(f"Weather lookup failed for activity {a['id']}: {e}")
+        try:
+            wx = weather_for_run(a, weather_cache)
+        except Exception as e:  # don't let one bad lookup kill the whole run
+            print(f"Weather lookup failed for activity {a['id']}: {e}")
 
         run_bear = bearing(slat, slng, elat, elng)
         score = compute_fitness_score(
@@ -377,7 +468,6 @@ def main():
         })
       except Exception as e:
         print(f"Skipping activity {a.get('id')} due to error: {e}")
-      time.sleep(0.1)  # be gentle on Open-Meteo
 
     if rows:
         rows.sort(key=lambda r: r["start_date_local"] or "")
@@ -388,7 +478,12 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys
     import traceback
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # live logs in CI
+    except Exception:
+        pass
     try:
         main()
     except Exception:
