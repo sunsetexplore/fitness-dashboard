@@ -358,6 +358,7 @@ def latest_start_epoch() -> Optional[int]:
 
 
 def append_rows(rows: list):
+    # CSV first — this is the file the dashboard reads, so it's the priority.
     write_header = not os.path.exists(CSV_PATH)
     with open(CSV_PATH, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
@@ -366,17 +367,23 @@ def append_rows(rows: list):
         for row in rows:
             w.writerow(row)
 
-    con = sqlite3.connect(DB_PATH)
-    cols = ", ".join(f'"{c}" TEXT' for c in FIELDS)
-    con.execute(f'CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, {cols})')
-    placeholders = ", ".join("?" for _ in FIELDS)
-    for row in rows:
-        con.execute(
-            f'INSERT OR REPLACE INTO runs VALUES ({placeholders})',
-            [row.get(c) for c in FIELDS],
-        )
-    con.commit()
-    con.close()
+    # SQLite is a bonus for ad-hoc queries. Wrap it so a DB hiccup can NEVER
+    # take down the job after the CSV has already been written safely.
+    try:
+        con = sqlite3.connect(DB_PATH)
+        # "id" is the primary key; the remaining columns are everything else.
+        other_cols = ", ".join(f'"{c}" TEXT' for c in FIELDS if c != "id")
+        con.execute(f'CREATE TABLE IF NOT EXISTS runs ("id" TEXT PRIMARY KEY, {other_cols})')
+        placeholders = ", ".join("?" for _ in FIELDS)
+        for row in rows:
+            con.execute(
+                f'INSERT OR REPLACE INTO runs VALUES ({placeholders})',
+                [row.get(c) for c in FIELDS],
+            )
+        con.commit()
+        con.close()
+    except Exception as e:
+        print(f"NOTE: CSV written fine; SQLite write skipped due to: {e}")
 
 
 # --------------------------------------------------------------------------
