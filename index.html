@@ -8,6 +8,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <style>
   :root{
@@ -74,9 +76,19 @@
   .legend-dot{ display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:middle; }
 
   /* ---- two column ---- */
-  .cols{ display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; align-items: start; }
+  .cols{ display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; align-items: stretch; }
   .cols > div{ min-width: 0; }
   @media (max-width: 880px){ .cols{ grid-template-columns: 1fr; } }
+
+  /* ---- zoom controls ---- */
+  .zoom-controls{ display:flex; align-items:center; gap: 4px; }
+  .zoom-btn{
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px; width: 26px; height: 26px;
+    border-radius: 6px; border: 1px solid var(--border); background: transparent;
+    color: var(--ink-dim); cursor: pointer; line-height: 1;
+  }
+  .zoom-btn:hover{ color: var(--ink); border-color: var(--ink-faint); }
+  .zoom-btn.reset{ width: auto; padding: 0 10px; font-size: 11px; letter-spacing: 0.04em; }
 
   /* ---- custom hover tooltip (calendar) ---- */
   #calTooltip{
@@ -95,9 +107,11 @@
     color: var(--ink-dim); cursor: pointer;
   }
   .year-tab.active{ background: var(--amber); color: #1c1300; border-color: var(--amber); font-weight: 600; }
+  .cal-col{ display:flex; flex-direction:column; }
+  .cal-panel{ display:flex; flex-direction:column; flex:1; }
   .heatmap-grid{
     display: grid; grid-auto-flow: column;
-    gap: 3px; width: 100%; margin-top: 12px;
+    gap: 4px; width: 100%; flex: 1; min-height: 0; margin-top: 12px;
   }
   .cell{ width: 100%; height: 100%; border-radius: 2px; background: var(--grid); cursor: default; }
   .legend-swatch{ display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:middle; }
@@ -145,6 +159,11 @@
       <div class="section-head">
         <div class="section-title">Fitness score over time</div>
         <div class="section-note"><span class="legend-dot" style="background:var(--cool)"></span>cool run<span style="display:inline-block;width:14px"></span><span class="legend-dot" style="background:var(--hot)"></span>hot run<span style="display:inline-block;width:14px"></span><span class="legend-dot" style="background:var(--amber)"></span>rolling avg</div>
+        <div class="zoom-controls">
+          <button class="zoom-btn" id="trendZoomIn" title="Zoom in">+</button>
+          <button class="zoom-btn" id="trendZoomOut" title="Zoom out">&minus;</button>
+          <button class="zoom-btn reset" id="trendZoomReset" title="Reset zoom">reset</button>
+        </div>
       </div>
       <div class="panel">
         <canvas id="trendChart" height="90"></canvas>
@@ -157,17 +176,22 @@
           <div class="section-head">
             <div class="section-title">Effort vs. heat load</div>
             <div class="section-note">pace at a given heart rate, colored by temp + dew point</div>
+            <div class="zoom-controls">
+              <button class="zoom-btn" id="heatZoomIn" title="Zoom in">+</button>
+              <button class="zoom-btn" id="heatZoomOut" title="Zoom out">&minus;</button>
+              <button class="zoom-btn reset" id="heatZoomReset" title="Reset zoom">reset</button>
+            </div>
           </div>
           <div class="panel">
             <canvas id="heatChart" height="230"></canvas>
           </div>
         </div>
-        <div>
+        <div class="cal-col">
           <div class="section-head">
             <div class="section-title">Run calendar</div>
             <div class="year-tabs" id="yearTabs"></div>
           </div>
-          <div class="panel">
+          <div class="panel cal-panel">
             <div class="heatmap-grid" id="heatmapGrid"></div>
             <div class="heatmap-scale">
               <span>lower score</span>
@@ -222,6 +246,9 @@ function fmtPaceMinMi(paceMinPerKm){
   return `${m}:${s.toString().padStart(2,'0')}/mi`;
 }
 function milesFromKm(km){ return km * 0.621371; }
+function fmtTime(date){
+  return date.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'});
+}
 function lerp(a,b,t){ return a + (b-a)*t; }
 function hexToRgb(hex){ const n = parseInt(hex.slice(1),16); return [n>>16 & 255, n>>8 & 255, n & 255]; }
 function rgbToStr(rgb){ return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`; }
@@ -293,7 +320,7 @@ function render(rows){
   });
   const rawPoints = rows.map(r => ({x: r._date.getTime(), y: r.fitness_score, temp: r.temp_f, row: r}));
 
-  new Chart(document.getElementById('trendChart'), {
+  const trendChart = new Chart(document.getElementById('trendChart'), {
     type: 'scatter',
     data: {
       datasets: [
@@ -325,6 +352,14 @@ function render(rows){
       interaction: { mode: 'nearest', intersect: false },
       plugins: {
         legend: { display: false },
+        zoom: {
+          pan: { enabled: true, mode: 'xy' },
+          zoom: {
+            wheel: { enabled: true, speed: 0.06 },
+            pinch: { enabled: true },
+            mode: 'xy'
+          }
+        },
         tooltip: {
           backgroundColor: '#1f2731', borderColor: '#2a323c', borderWidth: 1,
           titleColor: '#f2b84e', bodyColor: '#edf1f2', padding: 10, displayColors: false,
@@ -334,7 +369,8 @@ function render(rows){
             title: (items) => {
               const r = items[0].raw && items[0].raw.row;
               const d = r ? r._date : new Date(items[0].parsed.x);
-              return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+              const label = d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+              return r ? `${label} · ${fmtTime(d)}` : label;
             },
             label: (item) => {
               if (item.dataset.label !== 'run') return `${item.dataset.label}: ${item.parsed.y.toFixed(1)}`;
@@ -355,10 +391,14 @@ function render(rows){
       }
     }
   });
+  document.getElementById('trendZoomIn').onclick = () => trendChart.zoom(1.3);
+  document.getElementById('trendZoomOut').onclick = () => trendChart.zoom(0.7);
+  document.getElementById('trendZoomReset').onclick = () => trendChart.resetZoom();
+  document.getElementById('trendChart').addEventListener('dblclick', () => trendChart.resetZoom());
 
   // ---- heat load scatter ----
   const heatRows = rows.filter(r => r.avg_hr && r.pace_min_per_km && r.temp_f != null);
-  new Chart(document.getElementById('heatChart'), {
+  const heatChart = new Chart(document.getElementById('heatChart'), {
     type: 'scatter',
     data: {
       datasets: [{
@@ -373,13 +413,24 @@ function render(rows){
       responsive: true,
       plugins: {
         legend: { display: false },
+        zoom: {
+          pan: { enabled: true, mode: 'xy' },
+          zoom: {
+            wheel: { enabled: true, speed: 0.06 },
+            pinch: { enabled: true },
+            mode: 'xy'
+          }
+        },
         tooltip: {
           backgroundColor: '#1f2731', borderColor: '#2a323c', borderWidth: 1,
           titleColor: '#f2b84e', bodyColor: '#edf1f2', padding: 10, displayColors: false,
           titleFont: { family: 'IBM Plex Mono', size: 12, weight: '600' },
           bodyFont: { family: 'IBM Plex Mono', size: 11 },
           callbacks: {
-            title: (items) => items[0].raw.row._date.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}),
+            title: (items) => {
+              const r = items[0].raw.row;
+              return `${r._date.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'})} · ${fmtTime(r._date)}`;
+            },
             label: (item) => {
               const r = item.raw.row;
               return [
@@ -398,6 +449,10 @@ function render(rows){
       }
     }
   });
+  document.getElementById('heatZoomIn').onclick = () => heatChart.zoom(1.3);
+  document.getElementById('heatZoomOut').onclick = () => heatChart.zoom(0.7);
+  document.getElementById('heatZoomReset').onclick = () => heatChart.resetZoom();
+  document.getElementById('heatChart').addEventListener('dblclick', () => heatChart.resetZoom());
 
   // ---- calendar heatmap ----
   const byYear = {};
@@ -431,10 +486,11 @@ function render(rows){
     calTooltip.style.top = y + 'px';
   }
   function showCalTooltip(evt, run, dateKey){
-    const dateLabel = new Date(dateKey + 'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+    const baseDate = run ? run._date : new Date(dateKey + 'T00:00:00');
+    const dateLabel = baseDate.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
     if (run){
       calTooltip.innerHTML = `
-        <div style="color:var(--amber);font-weight:600;margin-bottom:4px">${dateLabel}</div>
+        <div style="color:var(--amber);font-weight:600;margin-bottom:4px">${dateLabel} · ${fmtTime(run._date)}</div>
         <div>${(run.name || 'Run')}</div>
         <div>${milesFromKm(run.distance_km||0).toFixed(2)} mi · ${fmtPaceMinMi(run.pace_min_per_km)}</div>
         <div>HR ${run.avg_hr ? Math.round(run.avg_hr) : '—'} avg / ${run.max_hr ? Math.round(run.max_hr) : '—'} max</div>
@@ -465,7 +521,6 @@ function render(rows){
 
     grid.style.gridTemplateColumns = `repeat(${numWeeks}, 1fr)`;
     grid.style.gridTemplateRows = `repeat(7, 1fr)`;
-    grid.style.aspectRatio = `${numWeeks} / 7`;
 
     for (let i = 0; i < startOffset; i++){
       const pad = document.createElement('div');
