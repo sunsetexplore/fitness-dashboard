@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Training Log — Weather-Adjusted Fitness</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+  :root{
+    --bg: #12161b;
+    --bg-panel: #191f26;
+    --bg-panel-raised: #1f2731;
+    --ink: #edf1f2;
+    --ink-dim: #8b97a3;
+    --ink-faint: #576270;
+    --grid: #2a323c;
+    --cool: #5ac2d8;
+    --hot: #ff6b4a;
+    --amber: #f2b84e;
+    --good: #6fcf97;
+    --border: #2a323c;
+  }
+  *{ box-sizing: border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+  }
+  .mono{ font-family: 'IBM Plex Mono', monospace; }
+  .wrap{ max-width: 1120px; margin: 0 auto; padding: 48px 24px 80px; }
+
+  /* ---- header ---- */
+  header{ margin-bottom: 40px; border-bottom: 1px solid var(--border); padding-bottom: 32px; }
+  .eyebrow{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--amber); margin: 0 0 10px;
+  }
+  h1{
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700; font-size: clamp(28px, 4vw, 42px);
+    margin: 0 0 8px; letter-spacing: -0.01em;
+  }
+  .sub{ color: var(--ink-dim); font-size: 15px; max-width: 640px; margin: 0; }
+  .sub b{ color: var(--ink); font-weight: 600; }
+
+  /* ---- stat cards ---- */
+  .stats{
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    margin-bottom: 40px; border-radius: 10px; overflow: hidden;
+  }
+  .stat{ background: var(--bg-panel); padding: 20px 22px; }
+  .stat-label{ font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px; }
+  .stat-value{ font-family: 'Space Grotesk', sans-serif; font-size: 26px; font-weight: 600; }
+  .stat-value small{ font-size: 14px; color: var(--ink-dim); font-weight: 500; }
+
+  @media (max-width: 720px){ .stats{ grid-template-columns: repeat(2, 1fr); } }
+
+  /* ---- sections ---- */
+  section{ margin-bottom: 44px; }
+  .section-head{ display:flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+  .section-title{ font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600; }
+  .section-note{ font-size: 13px; color: var(--ink-faint); }
+  .panel{ background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px 22px; }
+
+  .legend-dot{ display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+
+  /* ---- two column ---- */
+  .cols{ display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 880px){ .cols{ grid-template-columns: 1fr; } }
+
+  /* ---- calendar heatmap ---- */
+  .year-tabs{ display:flex; gap: 6px; flex-wrap: wrap; }
+  .year-tab{
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 5px 10px;
+    border-radius: 6px; border: 1px solid var(--border); background: transparent;
+    color: var(--ink-dim); cursor: pointer;
+  }
+  .year-tab.active{ background: var(--amber); color: #1c1300; border-color: var(--amber); font-weight: 600; }
+  .heatmap-scroll{ overflow-x: auto; padding-bottom: 4px; }
+  .heatmap-grid{
+    display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 12px);
+    gap: 3px; width: max-content; margin-top: 12px;
+  }
+  .cell{ width: 12px; height: 12px; border-radius: 2px; background: var(--grid); }
+  .cell[data-lvl="1"]{ background: #3a4a52; }
+  .cell[data-lvl="2"]{ background: #3f7d78; }
+  .cell[data-lvl="3"]{ background: #45a687; }
+  .cell[data-lvl="4"]{ background: var(--good); }
+  .cell[data-lvl="5"]{ background: var(--amber); }
+  .heatmap-scale{ display:flex; align-items:center; gap:6px; margin-top: 10px; font-size: 11px; color: var(--ink-faint); }
+
+  /* ---- table ---- */
+  table{ width: 100%; border-collapse: collapse; font-size: 13px; }
+  th{ text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); font-weight: 500; padding: 0 10px 10px; border-bottom: 1px solid var(--border); }
+  td{ padding: 9px 10px; border-bottom: 1px solid var(--border); font-family: 'IBM Plex Mono', monospace; }
+  tr:last-child td{ border-bottom: none; }
+  td.name{ font-family: 'Inter', sans-serif; color: var(--ink-dim); }
+  .score-chip{ display:inline-block; padding: 2px 7px; border-radius: 5px; font-weight: 600; }
+
+  footer{ margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 12px; color: var(--ink-faint); display:flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  a{ color: var(--cool); }
+
+  .loading, .error{ padding: 60px 24px; text-align: center; color: var(--ink-dim); font-family: 'IBM Plex Mono', monospace; font-size: 13px; }
+  .error{ color: var(--hot); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Weather-Adjusted</p>
+    <h1>Training Log</h1>
+    <p class="sub" id="headerSub">Loading runs&hellip;</p>
+  </header>
+
+  <div class="stats" id="statCards">
+    <div class="stat"><div class="stat-label">Runs</div><div class="stat-value" id="statRuns">—</div></div>
+    <div class="stat"><div class="stat-label">Distance logged</div><div class="stat-value" id="statDist">—</div></div>
+    <div class="stat"><div class="stat-label">Best score</div><div class="stat-value" id="statBest">—</div></div>
+    <div class="stat"><div class="stat-label">Last 90d avg vs all-time</div><div class="stat-value" id="statTrend">—</div></div>
+  </div>
+
+  <div id="content" style="display:none;">
+
+    <section>
+      <div class="section-head">
+        <div class="section-title">Fitness score over time</div>
+        <div class="section-note"><span class="legend-dot" style="background:var(--cool)"></span>cool run<span style="display:inline-block;width:14px"></span><span class="legend-dot" style="background:var(--hot)"></span>hot run<span style="display:inline-block;width:14px"></span><span class="legend-dot" style="background:var(--amber)"></span>rolling avg</div>
+      </div>
+      <div class="panel">
+        <canvas id="trendChart" height="90"></canvas>
+      </div>
+    </section>
+
+    <section>
+      <div class="cols">
+        <div>
+          <div class="section-head">
+            <div class="section-title">Effort vs. heat load</div>
+            <div class="section-note">pace at a given heart rate, colored by temp + dew point</div>
+          </div>
+          <div class="panel">
+            <canvas id="heatChart" height="230"></canvas>
+          </div>
+        </div>
+        <div>
+          <div class="section-head">
+            <div class="section-title">Run calendar</div>
+            <div class="year-tabs" id="yearTabs"></div>
+          </div>
+          <div class="panel">
+            <div class="heatmap-scroll">
+              <div class="heatmap-grid" id="heatmapGrid"></div>
+            </div>
+            <div class="heatmap-scale">
+              <span>lower score</span>
+              <span class="cell" data-lvl="1" style="display:inline-block"></span>
+              <span class="cell" data-lvl="2" style="display:inline-block"></span>
+              <span class="cell" data-lvl="3" style="display:inline-block"></span>
+              <span class="cell" data-lvl="4" style="display:inline-block"></span>
+              <span class="cell" data-lvl="5" style="display:inline-block"></span>
+              <span>higher score</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <div class="section-title">Recent runs</div>
+        <div class="section-note">last 12 synced</div>
+      </div>
+      <div class="panel">
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Name</th><th>Dist</th><th>Pace</th><th>HR</th><th>Temp</th><th>Score</th></tr>
+          </thead>
+          <tbody id="recentBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="loading" id="loadingMsg">reading runs.csv&hellip;</div>
+
+  <footer>
+    <span>Data synced daily via GitHub Actions from Strava + Open-Meteo.</span>
+    <span id="lastSynced"></span>
+  </footer>
+
+</div>
+
+<script>
+const CSV_PATH = 'runs.csv';
+
+function fmtPaceMinMi(paceMinPerKm){
+  if (!paceMinPerKm || isNaN(paceMinPerKm)) return '—';
+  const minPerMi = paceMinPerKm * 1.60934;
+  const m = Math.floor(minPerMi);
+  const s = Math.round((minPerMi - m) * 60);
+  return `${m}:${s.toString().padStart(2,'0')}/mi`;
+}
+function milesFromKm(km){ return km * 0.621371; }
+function lerp(a,b,t){ return a + (b-a)*t; }
+function hexToRgb(hex){ const n = parseInt(hex.slice(1),16); return [n>>16 & 255, n>>8 & 255, n & 255]; }
+function rgbToStr(rgb){ return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`; }
+function tempColor(tempF, min=45, max=98){
+  const t = Math.max(0, Math.min(1, (tempF - min) / (max - min)));
+  const cool = hexToRgb('#5ac2d8'), hot = hexToRgb('#ff6b4a');
+  return rgbToStr(cool.map((c,i)=>Math.round(lerp(c, hot[i], t))));
+}
+function scoreColorChip(score, lo, hi){
+  const t = Math.max(0, Math.min(1, (score-lo)/(hi-lo || 1)));
+  if (t > 0.66) return {bg:'rgba(111,207,151,0.18)', fg:'#6fcf97'};
+  if (t > 0.33) return {bg:'rgba(242,184,78,0.18)', fg:'#f2b84e'};
+  return {bg:'rgba(255,107,74,0.15)', fg:'#ff9478'};
+}
+
+fetch(CSV_PATH)
+  .then(r => { if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
+  .then(text => {
+    const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+    const rows = parsed.data
+      .filter(r => r.start_date_local && r.fitness_score != null && r.fitness_score !== '')
+      .map(r => ({...r, _date: new Date(r.start_date_local)}))
+      .sort((a,b) => a._date - b._date);
+    if (!rows.length) throw new Error('no scored runs found in runs.csv');
+    render(rows);
+  })
+  .catch(err => {
+    document.getElementById('loadingMsg').outerHTML =
+      `<div class="error">Couldn't load runs.csv (${err.message}).<br>Make sure this file sits next to runs.csv in the repo, and that GitHub Pages is serving from the branch root.</div>`;
+  });
+
+function render(rows){
+  document.getElementById('loadingMsg').style.display = 'none';
+  document.getElementById('content').style.display = 'block';
+
+  const scores = rows.map(r => r.fitness_score);
+  const totalMiles = rows.reduce((s,r) => s + milesFromKm(r.distance_km || 0), 0);
+  const best = Math.max(...scores);
+  const lo = Math.min(...scores), hi = best;
+
+  const first = rows[0]._date, last = rows[rows.length-1]._date;
+  const fmt = d => d.toLocaleDateString('en-US', {month:'short', year:'numeric'});
+  document.getElementById('headerSub').innerHTML =
+    `<b>${rows.length.toLocaleString()}</b> runs, ${fmt(first)} &rarr; ${fmt(last)}. Score adjusts pace-per-heart-rate for heat and wind — same effort in a Texas summer scores higher than the same effort on a cool morning.`;
+
+  document.getElementById('statRuns').textContent = rows.length.toLocaleString();
+  document.getElementById('statDist').innerHTML = `${Math.round(totalMiles).toLocaleString()} <small>mi</small>`;
+  document.getElementById('statBest').textContent = best.toFixed(1);
+
+  const cutoff = new Date(last); cutoff.setDate(cutoff.getDate() - 90);
+  const recent90 = rows.filter(r => r._date >= cutoff);
+  const avgAll = scores.reduce((a,b)=>a+b,0) / scores.length;
+  const avg90 = recent90.length ? recent90.reduce((a,b)=>a+b.fitness_score,0) / recent90.length : avgAll;
+  const delta = avg90 - avgAll;
+  const trendEl = document.getElementById('statTrend');
+  trendEl.innerHTML = `${avg90.toFixed(1)} <small>${delta>=0?'+':''}${delta.toFixed(1)}</small>`;
+  trendEl.style.color = delta >= 0 ? 'var(--good)' : 'var(--hot)';
+
+  const lastSynced = document.getElementById('lastSynced');
+  lastSynced.textContent = `Last run in data: ${last.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;
+
+  // ---- trend chart ----
+  const window_ = 15;
+  const rolling = rows.map((r,i) => {
+    const start = Math.max(0, i - window_ + 1);
+    const slice = rows.slice(start, i+1);
+    const avg = slice.reduce((s,x)=>s+x.fitness_score,0) / slice.length;
+    return {x: r._date.getTime(), y: avg};
+  });
+  const rawPoints = rows.map(r => ({x: r._date.getTime(), y: r.fitness_score, temp: r.temp_f}));
+
+  new Chart(document.getElementById('trendChart'), {
+    type: 'scatter',
+    data: {
+      datasets: [
+        {
+          label: 'run',
+          data: rawPoints,
+          pointBackgroundColor: rawPoints.map(p => tempColor(p.temp ?? 75)),
+          pointRadius: 2.5,
+          pointHoverRadius: 5,
+          showLine: false,
+          order: 2
+        },
+        {
+          label: `${window_}-run rolling avg`,
+          data: rolling,
+          type: 'line',
+          borderColor: '#f2b84e',
+          backgroundColor: 'rgba(242,184,78,0.08)',
+          borderWidth: 2.5,
+          pointRadius: 0,
+          fill: true,
+          tension: 0.25,
+          order: 1
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => new Date(items[0].parsed.x).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
+            label: (item) => item.dataset.label === 'run' ? `score ${item.parsed.y.toFixed(1)}` : `avg ${item.parsed.y.toFixed(1)}`
+          }
+        }
+      },
+      scales: {
+        x: { type: 'time', time: { unit: 'year' }, grid: { color: '#2a323c' }, ticks: { color: '#8b97a3' } },
+        y: { grid: { color: '#2a323c' }, ticks: { color: '#8b97a3' }, title: { display: true, text: 'fitness score', color: '#8b97a3' } }
+      }
+    }
+  });
+
+  // ---- heat load scatter ----
+  const heatRows = rows.filter(r => r.avg_hr && r.pace_min_per_km && r.temp_f != null);
+  new Chart(document.getElementById('heatChart'), {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        label: 'run',
+        data: heatRows.map(r => ({ x: r.avg_hr, y: r.pace_min_per_km * 1.60934, temp: r.temp_f, dew: r.dewpoint_f })),
+        pointBackgroundColor: heatRows.map(r => tempColor((r.temp_f||75) - (r.dewpoint_f ? 0 : 0) , 45, 98)),
+        pointRadius: 3,
+        pointHoverRadius: 6
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => `HR ${item.parsed.x} · ${fmtPaceMinMi(item.raw.y/1.60934)} · ${Math.round(item.raw.temp)}°F`
+          }
+        }
+      },
+      scales: {
+        x: { title: { display:true, text:'avg heart rate', color:'#8b97a3' }, grid:{color:'#2a323c'}, ticks:{color:'#8b97a3'} },
+        y: { reverse: true, title: { display:true, text:'pace (min/mi)', color:'#8b97a3' }, grid:{color:'#2a323c'}, ticks:{color:'#8b97a3'} }
+      }
+    }
+  });
+
+  // ---- calendar heatmap ----
+  const byYear = {};
+  rows.forEach(r => {
+    const y = r._date.getFullYear();
+    (byYear[y] ||= []).push(r);
+  });
+  const years = Object.keys(byYear).sort((a,b)=>b-a);
+  const tabsEl = document.getElementById('yearTabs');
+  years.forEach((y, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'year-tab' + (i===0 ? ' active' : '');
+    btn.textContent = y;
+    btn.onclick = () => {
+      document.querySelectorAll('.year-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      drawHeatmap(byYear[y], y, lo, hi);
+    };
+    tabsEl.appendChild(btn);
+  });
+  drawHeatmap(byYear[years[0]], years[0], lo, hi);
+
+  function drawHeatmap(yearRows, year, lo, hi){
+    const grid = document.getElementById('heatmapGrid');
+    grid.innerHTML = '';
+    const byDate = {};
+    yearRows.forEach(r => { byDate[r._date.toISOString().slice(0,10)] = r; });
+    const start = new Date(year, 0, 1);
+    const startOffset = start.getDay();
+    const end = new Date(year, 11, 31);
+    const totalDays = Math.round((end - start) / 86400000) + 1;
+    for (let i = 0; i < startOffset; i++){
+      const pad = document.createElement('div');
+      pad.className = 'cell'; pad.style.background = 'transparent';
+      grid.appendChild(pad);
+    }
+    for (let d = 0; d < totalDays; d++){
+      const date = new Date(year, 0, 1 + d);
+      const key = date.toISOString().slice(0,10);
+      const run = byDate[key];
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      if (run){
+        const t = (run.fitness_score - lo) / ((hi - lo) || 1);
+        const lvl = Math.max(1, Math.min(5, Math.ceil(t * 5)));
+        cell.dataset.lvl = lvl;
+        cell.title = `${key} — score ${run.fitness_score.toFixed(1)}, ${milesFromKm(run.distance_km||0).toFixed(1)} mi`;
+      } else {
+        cell.title = key;
+      }
+      grid.appendChild(cell);
+    }
+  }
+
+  // ---- recent runs table ----
+  const body = document.getElementById('recentBody');
+  rows.slice(-12).reverse().forEach(r => {
+    const tr = document.createElement('tr');
+    const chip = scoreColorChip(r.fitness_score, lo, hi);
+    tr.innerHTML = `
+      <td>${r._date.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</td>
+      <td class="name">${(r.name || 'Run')}</td>
+      <td>${milesFromKm(r.distance_km||0).toFixed(1)} mi</td>
+      <td>${fmtPaceMinMi(r.pace_min_per_km)}</td>
+      <td>${r.avg_hr ? Math.round(r.avg_hr) : '—'}</td>
+      <td>${r.temp_f != null ? Math.round(r.temp_f)+'°F' : '—'}</td>
+      <td><span class="score-chip" style="background:${chip.bg};color:${chip.fg}">${r.fitness_score.toFixed(1)}</span></td>
+    `;
+    body.appendChild(tr);
+  });
+}
+</script>
+</body>
+</html>
