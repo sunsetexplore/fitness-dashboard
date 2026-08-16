@@ -75,7 +75,17 @@
 
   /* ---- two column ---- */
   .cols{ display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; align-items: start; }
+  .cols > div{ min-width: 0; }
   @media (max-width: 880px){ .cols{ grid-template-columns: 1fr; } }
+
+  /* ---- custom hover tooltip (calendar) ---- */
+  #calTooltip{
+    position: fixed; z-index: 60; display: none; pointer-events: none;
+    background: var(--bg-panel-raised); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; line-height: 1.6; max-width: 220px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  }
 
   /* ---- calendar heatmap ---- */
   .year-tabs{ display:flex; gap: 6px; flex-wrap: wrap; }
@@ -85,17 +95,17 @@
     color: var(--ink-dim); cursor: pointer;
   }
   .year-tab.active{ background: var(--amber); color: #1c1300; border-color: var(--amber); font-weight: 600; }
-  .heatmap-scroll{ overflow-x: auto; padding-bottom: 4px; }
   .heatmap-grid{
-    display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 12px);
-    gap: 3px; width: max-content; margin-top: 12px;
+    display: grid; grid-auto-flow: column;
+    gap: 3px; width: 100%; margin-top: 12px;
   }
-  .cell{ width: 12px; height: 12px; border-radius: 2px; background: var(--grid); }
-  .cell[data-lvl="1"]{ background: #3a4a52; }
-  .cell[data-lvl="2"]{ background: #3f7d78; }
-  .cell[data-lvl="3"]{ background: #45a687; }
-  .cell[data-lvl="4"]{ background: var(--good); }
-  .cell[data-lvl="5"]{ background: var(--amber); }
+  .cell{ width: 100%; height: 100%; border-radius: 2px; background: var(--grid); cursor: default; }
+  .legend-swatch{ display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:middle; }
+  .cell[data-lvl="1"], .legend-swatch[data-lvl="1"]{ background: #3a4a52; }
+  .cell[data-lvl="2"], .legend-swatch[data-lvl="2"]{ background: #3f7d78; }
+  .cell[data-lvl="3"], .legend-swatch[data-lvl="3"]{ background: #45a687; }
+  .cell[data-lvl="4"], .legend-swatch[data-lvl="4"]{ background: var(--good); }
+  .cell[data-lvl="5"], .legend-swatch[data-lvl="5"]{ background: var(--amber); }
   .heatmap-scale{ display:flex; align-items:center; gap:6px; margin-top: 10px; font-size: 11px; color: var(--ink-faint); }
 
   /* ---- table ---- */
@@ -158,16 +168,14 @@
             <div class="year-tabs" id="yearTabs"></div>
           </div>
           <div class="panel">
-            <div class="heatmap-scroll">
-              <div class="heatmap-grid" id="heatmapGrid"></div>
-            </div>
+            <div class="heatmap-grid" id="heatmapGrid"></div>
             <div class="heatmap-scale">
               <span>lower score</span>
-              <span class="cell" data-lvl="1" style="display:inline-block"></span>
-              <span class="cell" data-lvl="2" style="display:inline-block"></span>
-              <span class="cell" data-lvl="3" style="display:inline-block"></span>
-              <span class="cell" data-lvl="4" style="display:inline-block"></span>
-              <span class="cell" data-lvl="5" style="display:inline-block"></span>
+              <span class="legend-swatch" data-lvl="1"></span>
+              <span class="legend-swatch" data-lvl="2"></span>
+              <span class="legend-swatch" data-lvl="3"></span>
+              <span class="legend-swatch" data-lvl="4"></span>
+              <span class="legend-swatch" data-lvl="5"></span>
               <span>higher score</span>
             </div>
           </div>
@@ -200,6 +208,8 @@
   </footer>
 
 </div>
+
+<div id="calTooltip"></div>
 
 <script>
 const CSV_PATH = 'runs.csv';
@@ -281,7 +291,7 @@ function render(rows){
     const avg = slice.reduce((s,x)=>s+x.fitness_score,0) / slice.length;
     return {x: r._date.getTime(), y: avg};
   });
-  const rawPoints = rows.map(r => ({x: r._date.getTime(), y: r.fitness_score, temp: r.temp_f}));
+  const rawPoints = rows.map(r => ({x: r._date.getTime(), y: r.fitness_score, temp: r.temp_f, row: r}));
 
   new Chart(document.getElementById('trendChart'), {
     type: 'scatter',
@@ -316,9 +326,26 @@ function render(rows){
       plugins: {
         legend: { display: false },
         tooltip: {
+          backgroundColor: '#1f2731', borderColor: '#2a323c', borderWidth: 1,
+          titleColor: '#f2b84e', bodyColor: '#edf1f2', padding: 10, displayColors: false,
+          titleFont: { family: 'IBM Plex Mono', size: 12, weight: '600' },
+          bodyFont: { family: 'IBM Plex Mono', size: 11 },
           callbacks: {
-            title: (items) => new Date(items[0].parsed.x).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
-            label: (item) => item.dataset.label === 'run' ? `score ${item.parsed.y.toFixed(1)}` : `avg ${item.parsed.y.toFixed(1)}`
+            title: (items) => {
+              const r = items[0].raw && items[0].raw.row;
+              const d = r ? r._date : new Date(items[0].parsed.x);
+              return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+            },
+            label: (item) => {
+              if (item.dataset.label !== 'run') return `${item.dataset.label}: ${item.parsed.y.toFixed(1)}`;
+              const r = item.raw.row;
+              return [
+                `score ${r.fitness_score.toFixed(1)}`,
+                `${milesFromKm(r.distance_km||0).toFixed(2)} mi · ${fmtPaceMinMi(r.pace_min_per_km)}`,
+                `HR ${r.avg_hr ? Math.round(r.avg_hr) : '—'} avg / ${r.max_hr ? Math.round(r.max_hr) : '—'} max`,
+                `${r.temp_f != null ? Math.round(r.temp_f)+'°F' : '—'} · dew ${r.dewpoint_f != null ? Math.round(r.dewpoint_f)+'°F' : '—'} · wind ${r.wind_mph != null ? Math.round(r.wind_mph)+'mph' : '—'}`
+              ];
+            }
           }
         }
       },
@@ -336,8 +363,8 @@ function render(rows){
     data: {
       datasets: [{
         label: 'run',
-        data: heatRows.map(r => ({ x: r.avg_hr, y: r.pace_min_per_km * 1.60934, temp: r.temp_f, dew: r.dewpoint_f })),
-        pointBackgroundColor: heatRows.map(r => tempColor((r.temp_f||75) - (r.dewpoint_f ? 0 : 0) , 45, 98)),
+        data: heatRows.map(r => ({ x: r.avg_hr, y: r.pace_min_per_km * 1.60934, row: r })),
+        pointBackgroundColor: heatRows.map(r => tempColor(r.temp_f ?? 75, 45, 98)),
         pointRadius: 3,
         pointHoverRadius: 6
       }]
@@ -347,8 +374,21 @@ function render(rows){
       plugins: {
         legend: { display: false },
         tooltip: {
+          backgroundColor: '#1f2731', borderColor: '#2a323c', borderWidth: 1,
+          titleColor: '#f2b84e', bodyColor: '#edf1f2', padding: 10, displayColors: false,
+          titleFont: { family: 'IBM Plex Mono', size: 12, weight: '600' },
+          bodyFont: { family: 'IBM Plex Mono', size: 11 },
           callbacks: {
-            label: (item) => `HR ${item.parsed.x} · ${fmtPaceMinMi(item.raw.y/1.60934)} · ${Math.round(item.raw.temp)}°F`
+            title: (items) => items[0].raw.row._date.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}),
+            label: (item) => {
+              const r = item.raw.row;
+              return [
+                `${fmtPaceMinMi(r.pace_min_per_km)} @ HR ${Math.round(r.avg_hr)}`,
+                `${milesFromKm(r.distance_km||0).toFixed(2)} mi`,
+                `${r.temp_f != null ? Math.round(r.temp_f)+'°F' : '—'} · dew ${r.dewpoint_f != null ? Math.round(r.dewpoint_f)+'°F' : '—'} · humidity ${r.humidity_pct ?? '—'}%`,
+                `score ${r.fitness_score.toFixed(1)}`
+              ];
+            }
           }
         }
       },
@@ -380,6 +420,38 @@ function render(rows){
   });
   drawHeatmap(byYear[years[0]], years[0], lo, hi);
 
+  const calTooltip = document.getElementById('calTooltip');
+  function positionCalTooltip(evt){
+    const pad = 14;
+    let x = evt.clientX + pad, y = evt.clientY + pad;
+    const rect = calTooltip.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth) x = evt.clientX - rect.width - pad;
+    if (y + rect.height > window.innerHeight) y = evt.clientY - rect.height - pad;
+    calTooltip.style.left = x + 'px';
+    calTooltip.style.top = y + 'px';
+  }
+  function showCalTooltip(evt, run, dateKey){
+    const dateLabel = new Date(dateKey + 'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+    if (run){
+      calTooltip.innerHTML = `
+        <div style="color:var(--amber);font-weight:600;margin-bottom:4px">${dateLabel}</div>
+        <div>${(run.name || 'Run')}</div>
+        <div>${milesFromKm(run.distance_km||0).toFixed(2)} mi · ${fmtPaceMinMi(run.pace_min_per_km)}</div>
+        <div>HR ${run.avg_hr ? Math.round(run.avg_hr) : '—'} avg / ${run.max_hr ? Math.round(run.max_hr) : '—'} max</div>
+        <div>${run.temp_f != null ? Math.round(run.temp_f)+'°F' : '—'} · dew ${run.dewpoint_f != null ? Math.round(run.dewpoint_f)+'°F' : '—'}</div>
+        <div style="color:var(--good);margin-top:4px">score ${run.fitness_score.toFixed(1)}</div>
+      `;
+    } else {
+      calTooltip.innerHTML = `
+        <div style="color:var(--ink-dim)">${dateLabel}</div>
+        <div style="color:var(--ink-faint)">no run</div>
+      `;
+    }
+    calTooltip.style.display = 'block';
+    positionCalTooltip(evt);
+  }
+  function hideCalTooltip(){ calTooltip.style.display = 'none'; }
+
   function drawHeatmap(yearRows, year, lo, hi){
     const grid = document.getElementById('heatmapGrid');
     grid.innerHTML = '';
@@ -389,6 +461,12 @@ function render(rows){
     const startOffset = start.getDay();
     const end = new Date(year, 11, 31);
     const totalDays = Math.round((end - start) / 86400000) + 1;
+    const numWeeks = Math.ceil((startOffset + totalDays) / 7);
+
+    grid.style.gridTemplateColumns = `repeat(${numWeeks}, 1fr)`;
+    grid.style.gridTemplateRows = `repeat(7, 1fr)`;
+    grid.style.aspectRatio = `${numWeeks} / 7`;
+
     for (let i = 0; i < startOffset; i++){
       const pad = document.createElement('div');
       pad.className = 'cell'; pad.style.background = 'transparent';
@@ -404,10 +482,10 @@ function render(rows){
         const t = (run.fitness_score - lo) / ((hi - lo) || 1);
         const lvl = Math.max(1, Math.min(5, Math.ceil(t * 5)));
         cell.dataset.lvl = lvl;
-        cell.title = `${key} — score ${run.fitness_score.toFixed(1)}, ${milesFromKm(run.distance_km||0).toFixed(1)} mi`;
-      } else {
-        cell.title = key;
       }
+      cell.addEventListener('mouseenter', (e) => showCalTooltip(e, run, key));
+      cell.addEventListener('mousemove', positionCalTooltip);
+      cell.addEventListener('mouseleave', hideCalTooltip);
       grid.appendChild(cell);
     }
   }
